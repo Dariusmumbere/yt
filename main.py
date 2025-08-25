@@ -12,6 +12,11 @@ from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 import json
 import re
+import logging
+
+# Set up logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Harmony YouTube Downloader API", version="1.0.0")
 
@@ -81,11 +86,13 @@ def create_cookies_file():
     
     with open(COOKIE_FILE, 'w') as f:
         f.write(cookies_content)
-    print(f"Created {COOKIE_FILE} with provided cookies")
+    logger.info(f"Created {COOKIE_FILE} with provided cookies")
 
 # Create cookies file on startup
 if not os.path.exists(COOKIE_FILE):
     create_cookies_file()
+else:
+    logger.info(f"Using existing {COOKIE_FILE}")
 
 async def retry_yt_dlp_operation(operation, max_retries=3, initial_delay=2):
     """Retry yt-dlp operation with exponential backoff"""
@@ -99,14 +106,14 @@ async def retry_yt_dlp_operation(operation, max_retries=3, initial_delay=2):
                 "Private video" in error_msg) and attempt < max_retries - 1:
                 # Exponential backoff with jitter
                 delay = initial_delay * (2 ** attempt) + random.uniform(0, 1)
-                print(f"Download error, retrying in {delay:.2f} seconds (attempt {attempt + 1}/{max_retries})")
+                logger.warning(f"Download error, retrying in {delay:.2f} seconds (attempt {attempt + 1}/{max_retries})")
                 await asyncio.sleep(delay)
                 continue
             raise
         except Exception as e:
             if attempt < max_retries - 1:
                 delay = initial_delay * (2 ** attempt) + random.uniform(0, 1)
-                print(f"Error occurred, retrying in {delay:.2f} seconds (attempt {attempt + 1}/{max_retries}): {str(e)}")
+                logger.warning(f"Error occurred, retrying in {delay:.2f} seconds (attempt {attempt + 1}/{max_retries}): {str(e)}")
                 await asyncio.sleep(delay)
                 continue
             raise
@@ -161,8 +168,10 @@ async def search_videos(request: SearchRequest):
         return results
         
     except HttpError as e:
+        logger.error(f"YouTube API error: {str(e)}")
         raise HTTPException(status_code=500, detail=f"YouTube API error: {str(e)}")
     except Exception as e:
+        logger.error(f"Search failed: {str(e)}")
         import traceback
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Search failed: {str(e)}")
@@ -203,7 +212,9 @@ async def download_audio(video_id: str, format: str = "bestaudio/best"):
         # Add cookies if available
         if os.path.exists(COOKIE_FILE):
             ydl_opts['cookiefile'] = COOKIE_FILE
-            print(f"Using cookies from {COOKIE_FILE}")
+            logger.info(f"Using cookies from {COOKIE_FILE}")
+        else:
+            logger.warning("No cookies file found. Downloading without cookies may fail for some videos.")
         
         # Additional options to avoid bot detection
         ydl_opts.update({
@@ -236,8 +247,15 @@ async def download_audio(video_id: str, format: str = "bestaudio/best"):
         return await retry_yt_dlp_operation(download_operation)
             
     except Exception as e:
+        logger.error(f"Download failed: {str(e)}")
         import traceback
         traceback.print_exc()
+        # Check if it's a cookie-related error
+        if "Sign in to confirm you're not a bot" in str(e):
+            raise HTTPException(
+                status_code=403, 
+                detail="YouTube requires authentication. Please import fresh cookies using the cookie import feature."
+            )
         raise HTTPException(status_code=500, detail=f"Download failed: {str(e)}")
 
 
@@ -275,9 +293,11 @@ async def import_cookies(request: CookieImportRequest):
         with open(COOKIE_FILE, 'w') as f:
             f.write("\n".join(netscape_cookies))
         
+        logger.info(f"Cookies imported to {COOKIE_FILE}")
         return {"status": "success", "message": f"Cookies imported to {COOKIE_FILE}"}
     
     except Exception as e:
+        logger.error(f"Cookie import failed: {str(e)}")
         import traceback
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Cookie import failed: {str(e)}")
@@ -288,7 +308,7 @@ async def check_cookies():
     """Check if cookies file exists"""
     exists = os.path.exists(COOKIE_FILE)
     size = os.path.getsize(COOKIE_FILE) if exists else 0
-    return {"exists": exists, "size": size}
+    return {"exists": exists, "size": size, "path": os.path.abspath(COOKIE_FILE)}
 
 
 @app.get("/api/downloads")
@@ -310,15 +330,16 @@ async def list_downloads():
         
         return {"downloads": downloads}
     except Exception as e:
+        logger.error(f"Error listing downloads: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Error listing downloads: {str(e)}")
 
 
 def progress_hook(d):
     """Progress hook for download updates"""
     if d['status'] == 'downloading':
-        print(f"Downloading: {d.get('_percent_str', '0%')}")
+        logger.info(f"Downloading: {d.get('_percent_str', '0%')}")
     elif d['status'] == 'finished':
-        print("Download completed, converting...")
+        logger.info("Download completed, converting...")
 
 
 def format_duration(seconds: Optional[int]) -> str:
