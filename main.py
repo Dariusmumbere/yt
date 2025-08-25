@@ -6,7 +6,6 @@ import yt_dlp
 import asyncio
 import os
 from datetime import datetime
-import uuid
 
 app = FastAPI(title="Harmony YouTube Downloader API", version="1.0.0")
 
@@ -36,6 +35,7 @@ class DownloadRequest(BaseModel):
     video_id: str
     format: Optional[str] = "bestaudio/best"
 
+
 @app.post("/api/search", response_model=List[VideoInfo])
 async def search_videos(request: SearchRequest):
     """Search YouTube videos"""
@@ -44,19 +44,18 @@ async def search_videos(request: SearchRequest):
             'format': 'bestaudio/best',
             'quiet': True,
             'no_warnings': True,
-            'extract_flat': True,
-            'force_json': True,
-            'default_search': 'ytsearch{}'.format(request.max_results),
+            'extract_flat': False,  # fetch full metadata (duration, etc.)
+            'default_search': f'ytsearch{request.max_results}',
         }
         
         results = []
-        
+
         def extract_info(info_dict):
             return VideoInfo(
                 id=info_dict.get('id', ''),
                 title=info_dict.get('title', 'No title'),
                 channel=info_dict.get('uploader', 'Unknown channel'),
-                duration=format_duration(info_dict.get('duration', 0)),
+                duration=format_duration(info_dict.get('duration')),
                 thumbnail=info_dict.get('thumbnail', ''),
                 view_count=info_dict.get('view_count', 0),
                 upload_date=info_dict.get('upload_date', '')
@@ -75,7 +74,10 @@ async def search_videos(request: SearchRequest):
         return results
         
     except Exception as e:
+        import traceback
+        traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Search failed: {str(e)}")
+
 
 @app.post("/api/download/{video_id}")
 async def download_audio(video_id: str, format: str = "bestaudio/best"):
@@ -104,18 +106,21 @@ async def download_audio(video_id: str, format: str = "bestaudio/best"):
             url = f"https://www.youtube.com/watch?v={video_id}"
             info = await asyncio.to_thread(ydl.extract_info, url, download=True)
             
-            # Get the actual filename
+            # Get the actual filename (convert extensions to mp3)
             actual_filename = ydl.prepare_filename(info).replace('.webm', '.mp3').replace('.m4a', '.mp3')
             
             return {
                 "status": "success",
                 "filename": actual_filename,
                 "title": info.get('title', ''),
-                "duration": format_duration(info.get('duration', 0))
+                "duration": format_duration(info.get('duration'))
             }
             
     except Exception as e:
+        import traceback
+        traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Download failed: {str(e)}")
+
 
 def progress_hook(d):
     """Progress hook for download updates"""
@@ -124,21 +129,24 @@ def progress_hook(d):
     elif d['status'] == 'finished':
         print("Download completed, converting...")
 
-def format_duration(seconds: int) -> str:
-    """Convert seconds to MM:SS format"""
-    if not seconds:
+
+def format_duration(seconds: Optional[int]) -> str:
+    """Convert seconds to MM:SS format, safe for None"""
+    if not seconds or not isinstance(seconds, int):
         return "0:00"
-    minutes = seconds // 60
-    seconds = seconds % 60
-    return f"{minutes}:{seconds:02d}"
+    minutes, sec = divmod(seconds, 60)
+    return f"{minutes}:{sec:02d}"
+
 
 @app.get("/")
 async def root():
     return {"message": "Harmony YouTube Downloader API", "status": "running"}
 
+
 @app.get("/health")
 async def health_check():
     return {"status": "healthy", "timestamp": datetime.now().isoformat()}
+
 
 if __name__ == "__main__":
     import uvicorn
