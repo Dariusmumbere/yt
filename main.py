@@ -8,6 +8,8 @@ import os
 import time
 import random
 from datetime import datetime
+from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError
 
 app = FastAPI(title="Harmony YouTube Downloader API", version="1.0.0")
 
@@ -19,6 +21,10 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# YouTube Data API configuration
+YOUTUBE_API_KEY = "AIzaSyCCJa0xel2ISGG3MG8VCmV6pMEZF9joDFM"
+youtube = build('youtube', 'v3', developerKey=YOUTUBE_API_KEY)
 
 class SearchRequest(BaseModel):
     query: str
@@ -72,51 +78,54 @@ async def retry_yt_dlp_operation(operation, max_retries=3, initial_delay=2):
 
 @app.post("/api/search", response_model=List[VideoInfo])
 async def search_videos(request: SearchRequest):
-    """Search YouTube videos with retry logic"""
+    """Search YouTube videos using YouTube Data API"""
     try:
-        ydl_opts = {
-            'format': 'bestaudio/best',
-            'quiet': True,
-            'no_warnings': True,
-            'extract_flat': False,
-            'default_search': f'ytsearch{request.max_results}',
-            'http_headers': DEFAULT_HEADERS,
-            'socket_timeout': 30,
-            'extractor_args': {
-                'youtube': {
-                    'skip': ['dash', 'hls'],
-                    'player_client': ['android', 'web'],
-                }
-            },
-        }
+        # Use YouTube Data API for search
+        search_response = youtube.search().list(
+            q=request.query,
+            part="snippet",
+            maxResults=request.max_results,
+            type="video"
+        ).execute()
+        
+        # Extract video IDs for getting additional details
+        video_ids = [item['id']['videoId'] for item in search_response['items']]
+        
+        # Get video details (including duration)
+        videos_response = youtube.videos().list(
+            part="snippet,contentDetails,statistics",
+            id=",".join(video_ids)
+        ).execute()
         
         results = []
-
-        def extract_info(info_dict):
-            return VideoInfo(
-                id=info_dict.get('id', ''),
-                title=info_dict.get('title', 'No title'),
-                channel=info_dict.get('uploader', 'Unknown channel'),
-                duration=format_duration(info_dict.get('duration')),
-                thumbnail=info_dict.get('thumbnail', ''),
-                view_count=info_dict.get('view_count', 0),
-                upload_date=info_dict.get('upload_date', '')
-            )
+        for item in videos_response['items']:
+            # Format duration from ISO 8601 to readable format
+            duration = parse_duration(item['contentDetails']['duration'])
+            
+            # Format upload date
+            upload_date = format_date(item['snippet']['publishedAt'])
+            
+            # Get view count
+            view_count = int(item['statistics'].get('viewCount', 0))
+            
+            # Get thumbnail (highest resolution available)
+            thumbnails = item['snippet']['thumbnails']
+            thumbnail = thumbnails.get('high', thumbnails.get('medium', thumbnails.get('default', {}))).get('url', '')
+            
+            results.append(VideoInfo(
+                id=item['id'],
+                title=item['snippet']['title'],
+                channel=item['snippet']['channelTitle'],
+                duration=duration,
+                thumbnail=thumbnail,
+                view_count=view_count,
+                upload_date=upload_date
+            ))
         
-        async def search_operation():
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                search_query = f"ytsearch{request.max_results}:{request.query}"
-                info = await asyncio.to_thread(ydl.extract_info, search_query, download=False)
-                
-                if 'entries' in info:
-                    for entry in info['entries']:
-                        if entry:
-                            results.append(extract_info(entry))
-                return results
+        return results
         
-        # Use retry logic for the search operation
-        return await retry_yt_dlp_operation(search_operation)
-        
+    except HttpError as e:
+        raise HTTPException(status_code=500, detail=f"YouTube API error: {str(e)}")
     except Exception as e:
         import traceback
         traceback.print_exc()
@@ -192,6 +201,33 @@ def format_duration(seconds: Optional[int]) -> str:
         return "0:00"
     minutes, sec = divmod(seconds, 60)
     return f"{minutes}:{sec:02d}"
+
+
+def parse_duration(duration_str: str) -> str:
+    """Parse ISO 8601 duration format to MM:SS"""
+    import isodate
+    try:
+        duration = isodate.parse_duration(duration_str)
+        total_seconds = int(duration.total_seconds())
+        minutes, seconds = divmod(total_seconds, 60)
+        hours, minutes = divmod(minutes, 60)
+        
+        if hours > 0:
+            return f"{hours}:{minutes:02d}:{seconds:02d}"
+        else:
+            return f"{minutes}:{seconds:02d}"
+    except:
+        return "0:00"
+
+
+def format_date(date_str: str) -> str:
+    """Format ISO date to YYYY-MM-DD"""
+    try:
+        from datetime import datetime
+        dt = datetime.fromisoformat(date_str.replace('Z', '+00:00'))
+        return dt.strftime("%Y-%m-%d")
+    except:
+        return date_str[:10] if len(date_str) >= 10 else ""
 
 
 @app.get("/")
